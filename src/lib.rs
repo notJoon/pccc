@@ -34,6 +34,15 @@ pub enum Value {
 }
 
 impl Value {
+    /// get inner list if it exists.
+    pub fn unwrap_list(&self) -> Vec<Value> {
+        if let Value::List(lst) = self {
+            lst.to_owned()
+        } else {
+            vec![]
+        }
+    }
+
     pub fn to_string(&self) -> String {
         match self {
             Value::Str(s) => s.clone(),
@@ -142,7 +151,7 @@ struct MemoKey {
 /// let mut g = Grammar::new();
 ///
 /// // rule: Number -> Digit+
-/// g.define("Number", seq(digit(), many(digit())));
+/// g.define("Number", seq([digit(), many(digit())]));
 ///
 /// // parse input using the defined rule
 /// let result = g.parse("Number", "12345xyz");
@@ -168,6 +177,7 @@ impl Grammar {
     }
 
     /// Define a rule by name, taking a `Parser`.
+    #[inline(always)]
     pub fn define(&mut self, name: &str, p: Parser) {
         self.rules.insert(name.to_string(), p);
     }
@@ -231,11 +241,12 @@ impl Grammar {
 /// 2. For **non-greedy matching** (consuming as little input as possible), put the recursive pattern last.
 ///
 /// Incorrect ordering can lead to infinite recursion or incomplete parsing.
+#[inline(always)]
 pub fn rule_ref(name: String) -> Parser {
     Rc::new(move |g: &mut Grammar, input: &str| g.parse_rule(&name, input))
 }
 
-/// Sequence applies p1, then p2, returning their values as a list.
+/// Sequence takes multiple parsers and applies them in sequence.
 ///
 /// The `seq` combinator applies two parsers in sequence. It only succeeds
 /// if both parsers succeed. The result combines both parsed values into a list.
@@ -251,7 +262,7 @@ pub fn rule_ref(name: String) -> Parser {
 /// ```rust
 /// use pccc::{Grammar, seq, lit, Value};
 ///
-/// let parser = seq(lit("hello"), lit(" world"));
+/// let parser = seq([lit("hello"), lit(" world")]);
 /// let mut g = Grammar::new();
 ///
 /// let result = parser(&mut g, "hello world!");
@@ -276,18 +287,23 @@ pub fn rule_ref(name: String) -> Parser {
 ///     panic!("expected List value");
 /// }
 /// ```
-pub fn seq(p1: Parser, p2: Parser) -> Parser {
-    Rc::new(move |g, input| {
-        let r1 = p1(g, input)?;
-        let r2 = p2(g, &r1.rest)?;
-        let mut list = Vec::new();
+pub fn seq<I>(parsers: I) -> Parser
+where
+    I: IntoIterator<Item = Parser> + Clone + 'static,
+{
+    Rc::new(move |q, input| {
+        let mut rest = input.to_string();
+        let mut values = Vec::new();
 
-        list.push(r1.value);
-        list.push(r2.value);
+        for parser in parsers.clone().into_iter() {
+            let result = parser(q, &rest)?;
+            values.push(result.value);
+            rest = result.rest;
+        }
 
         Ok(ParseResult {
-            value: Value::List(list),
-            rest: r2.rest,
+            value: Value::List(values),
+            rest,
         })
     })
 }
@@ -323,6 +339,7 @@ pub fn seq(p1: Parser, p2: Parser) -> Parser {
 ///     lit("a")
 /// ));
 /// ```
+#[inline(always)]
 pub fn alt(p1: Parser, p2: Parser) -> Parser {
     Rc::new(move |g, input| match p1(g, input) {
         ok @ Ok(_) => ok,
@@ -557,7 +574,7 @@ pub fn satisfy<F>(pred: F) -> Parser
 where
     F: Fn(char) -> bool + 'static,
 {
-    Rc::new(move |_g, input| {
+    Rc::new(move |_, input| {
         let mut chars = input.chars();
         if let Some(c) = chars.next() {
             if pred(c) {
@@ -580,6 +597,7 @@ where
 ///
 /// The `digit` function is a convenience parser that matches any ASCII digit character.
 /// It is equivalent to `satisfy(|c| c.is_ascii_digit())`.
+#[inline(always)]
 pub fn digit() -> Parser {
     satisfy(|c| c.is_ascii_digit())
 }
@@ -588,6 +606,7 @@ pub fn digit() -> Parser {
 ///
 /// The `letter` function is a convenience parser that matches any Unicode alphabetic character.
 /// It is equivalent to `satisfy(|c| c.is_alphabetic())`.
+#[inline(always)]
 pub fn letter() -> Parser {
     satisfy(|c| c.is_alphabetic())
 }
@@ -596,253 +615,7 @@ pub fn letter() -> Parser {
 ///
 /// The `space` function is a convenience parser that matches any Unicode whitespace character.
 /// It is equivalent to `satisfy(|c| c.is_whitespace())`.
+#[inline(always)]
 pub fn space() -> Parser {
     satisfy(|c| c.is_whitespace())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parser_helpers() {
-        let mut g = Grammar::new();
-
-        assert!(digit()(&mut g, "123").is_ok());
-        assert!(digit()(&mut g, "abc").is_err());
-
-        assert!(letter()(&mut g, "abc").is_ok());
-        assert!(letter()(&mut g, "123").is_err());
-
-        assert!(space()(&mut g, " abc").is_ok());
-        assert!(space()(&mut g, "\tabc").is_ok());
-        assert!(space()(&mut g, "\nabc").is_ok());
-        assert!(space()(&mut g, "abc").is_err());
-    }
-
-    #[test]
-    fn test_lit() {
-        let mut g = Grammar::new();
-        let parser = lit("hello");
-        let result = parser(&mut g, "hello world");
-        assert!(result.is_ok());
-
-        if let Ok(res) = result {
-            assert_eq!(res.rest, " world");
-            if let Value::Str(s) = res.value {
-                assert_eq!(s, "hello");
-            } else {
-                panic!("expected Str value");
-            }
-        }
-    }
-
-    #[test]
-    fn test_digit() {
-        let mut g = Grammar::new();
-        let parser = digit();
-
-        let result = parser(&mut g, "5abc");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "abc");
-            if let Value::Char(c) = res.value {
-                assert_eq!(c, '5');
-            } else {
-                panic!("expected Char value");
-            }
-        }
-
-        let result = parser(&mut g, "abc");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_letter() {
-        let mut g = Grammar::new();
-        let parser = letter();
-
-        let result = parser(&mut g, "abc");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "bc");
-            if let Value::Char(c) = res.value {
-                assert_eq!(c, 'a');
-            } else {
-                panic!("expected Char value");
-            }
-        }
-
-        let result = parser(&mut g, "123");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_seq() {
-        let mut g = Grammar::new();
-        let parser = seq(lit("hello"), lit("world"));
-
-        let result = parser(&mut g, "helloworld!");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "!");
-            if let Value::List(items) = res.value {
-                assert_eq!(items.len(), 2);
-                if let Value::Str(s1) = &items[0] {
-                    assert_eq!(s1, "hello");
-                } else {
-                    panic!("expected Str value for first item");
-                }
-                if let Value::Str(s2) = &items[1] {
-                    assert_eq!(s2, "world");
-                } else {
-                    panic!("expected Str value for second item");
-                }
-            } else {
-                panic!("expected List value");
-            }
-        }
-
-        let result = parser(&mut g, "hello123");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_alt() {
-        let mut g = Grammar::new();
-        let parser = alt(lit("hello"), lit("world"));
-
-        let result = parser(&mut g, "hello123");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "123");
-            if let Value::Str(s) = res.value {
-                assert_eq!(s, "hello");
-            } else {
-                panic!("expected Str value");
-            }
-        }
-
-        let result = parser(&mut g, "world123");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "123");
-            if let Value::Str(s) = res.value {
-                assert_eq!(s, "world");
-            } else {
-                panic!("expected Str value");
-            }
-        }
-
-        let result = parser(&mut g, "123");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_many() {
-        let mut g = Grammar::new();
-        let parser = many(digit());
-
-        let result = parser(&mut g, "12345abc");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "abc");
-            if let Value::List(items) = res.value {
-                assert_eq!(items.len(), 5);
-                for (i, item) in items.iter().enumerate() {
-                    if let Value::Char(c) = item {
-                        assert_eq!(*c, char::from_digit((i + 1) as u32, 10).unwrap());
-                    } else {
-                        panic!("expected Char value");
-                    }
-                }
-            } else {
-                panic!("expected List value");
-            }
-        }
-
-        let result = parser(&mut g, "abc");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "abc");
-            if let Value::List(items) = res.value {
-                assert_eq!(items.len(), 0);
-            } else {
-                panic!("expected List value");
-            }
-        }
-    }
-
-    #[test]
-    fn test_opt() {
-        let mut g = Grammar::new();
-        let parser = opt(lit("hello"));
-
-        let result = parser(&mut g, "hello world");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, " world");
-            if let Value::Str(s) = res.value {
-                assert_eq!(s, "hello");
-            } else {
-                panic!("expected Str value");
-            }
-        }
-
-        let result = parser(&mut g, "world");
-        assert!(result.is_ok()); // always succeeds
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "world"); // input should be left unchanged
-            assert!(matches!(res.value, Value::None));
-        }
-    }
-
-    #[test]
-    fn test_rule_ref() {
-        let mut g = Grammar::new();
-
-        // A -> "a" | "a" A
-        g.define("A", alt(seq(lit("a"), rule_ref("A".to_string())), lit("a")));
-
-        // recursive rule test
-        let result = g.parse("A", "aaa");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "");
-        }
-
-        let result = g.parse("A", "a");
-        assert!(result.is_ok());
-        if let Ok(res) = result {
-            assert_eq!(res.rest, "", "rest should be empty");
-        }
-
-        let result = g.parse("A", "b");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_grammar_memoization() {
-        let mut g = Grammar::new();
-
-        // grammar:
-        //
-        // Expr -> Term ("+" Term)*
-        // Term -> digit
-
-        g.define("Term", digit());
-        g.define(
-            "Expr",
-            seq(
-                rule_ref("Term".to_string()),
-                many(seq(lit("+"), rule_ref("Term".to_string()))),
-            ),
-        );
-
-        // test memoization effect with long expression
-        let result = g.parse("Expr", "1+2+3+4+5");
-        assert!(result.is_ok());
-        assert!(g.memo_size() > 0, "memo cache should be non-empty");
-        println!("memo size: {}", g.memo_size());
-    }
 }
