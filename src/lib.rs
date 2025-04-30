@@ -1,5 +1,10 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
+
+use crate::errors::ParseError;
+
+mod errors;
 
 /// A dynamically-typed value for parsed results.
 ///
@@ -43,15 +48,6 @@ impl Value {
         }
     }
 
-    pub fn to_string(&self) -> String {
-        match self {
-            Value::Str(s) => s.clone(),
-            Value::Char(c) => c.to_string(),
-            Value::List(items) => format!("[{}]", Self::format_list(items)),
-            Value::None => "None".to_string(),
-        }
-    }
-
     /// Get the kind of a `Value`.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -79,6 +75,17 @@ impl Value {
             }
         }
         result
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Str(s) => write!(f, "{}", s),
+            Value::Char(c) => write!(f, "{}", c),
+            Value::List(items) => write!(f, "{}", Self::format_list(items)),
+            Value::None => write!(f, "None"),
+        }
     }
 }
 
@@ -110,7 +117,7 @@ pub struct ParseResult {
 /// A Parser is a wrapped function that transforms input text according to grammar rules.
 ///
 /// The parser takes a mutable reference to a `Grammar` (for rule lookups and memoization)
-/// and an input string, returning either a successful `ParseResult` or an error message.
+/// and an input string, returning either a successful `ParseResult` or a `ParseError`.
 ///
 /// /// # Example
 ///
@@ -127,7 +134,7 @@ pub struct ParseResult {
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, " world"); // Remaining unparsed input
 /// ```
-pub type Parser = Rc<dyn Fn(&mut Grammar, &str) -> Result<ParseResult, String>>;
+pub type Parser = Rc<dyn Fn(&mut Grammar, &str) -> Result<ParseResult, ParseError>>;
 
 #[derive(PartialEq, Eq, Hash)]
 struct MemoKey {
@@ -163,11 +170,15 @@ struct MemoKey {
 pub struct Grammar {
     input: String,
     rules: HashMap<String, Parser>,
-    memo: HashMap<MemoKey, Result<ParseResult, String>>,
+    memo: HashMap<MemoKey, Result<ParseResult, ParseError>>,
 }
 
 impl Grammar {
     /// Create a new empty Grammar.
+    #[allow(
+        clippy::new_without_default,
+        reason = "stack overflow when using default"
+    )]
     pub fn new() -> Self {
         Grammar {
             input: String::new(),
@@ -183,14 +194,14 @@ impl Grammar {
     }
 
     /// Parse the named rule over the given text, resetting memo.
-    pub fn parse(&mut self, name: &str, text: &str) -> Result<ParseResult, String> {
+    pub fn parse(&mut self, name: &str, text: &str) -> Result<ParseResult, ParseError> {
         self.input = text.to_string();
         self.memo.clear();
         self.parse_rule(name, text)
     }
 
     /// parse a rule with packrat memoization.
-    fn parse_rule(&mut self, name: &str, input: &str) -> Result<ParseResult, String> {
+    fn parse_rule(&mut self, name: &str, input: &str) -> Result<ParseResult, ParseError> {
         let pos = self.input.len() - input.len();
         let key = MemoKey {
             name: name.to_string(),
@@ -204,7 +215,7 @@ impl Grammar {
 
         // Ensure the rule is defined.
         if !self.rules.contains_key(name) {
-            return Err(format!("rule '{}' not defined", name));
+            return Err(ParseError::new(format!("rule '{}' not defined", name), pos));
         }
 
         let parser = self.rules.get(name).unwrap().clone();
@@ -218,12 +229,15 @@ impl Grammar {
     }
 
     /// Check that there is no input left after parsing
-    pub fn parse_all(&mut self, rule: &str, input: &str) -> Result<Value, String> {
+    pub fn parse_all(&mut self, rule: &str, input: &str) -> Result<Value, ParseError> {
         let result = self.parse(rule, input)?;
         if result.rest.is_empty() {
             Ok(result.value)
         } else {
-            Err("input not fully consumed".to_string())
+            Err(ParseError::new(
+                "input not fully consumed".to_string(),
+                self.input.len() - result.rest.len(),
+            ))
         }
     }
 
@@ -291,13 +305,15 @@ pub fn seq<I>(parsers: I) -> Parser
 where
     I: IntoIterator<Item = Parser> + Clone + 'static,
 {
-    Rc::new(move |q, input| {
+    Rc::new(move |g, input| {
         let mut rest = input.to_string();
         let mut values = Vec::new();
+        let mut _pos = 0;
 
         for parser in parsers.clone().into_iter() {
-            let result = parser(q, &rest)?;
+            let result = parser(g, &rest)?;
             values.push(result.value);
+            _pos += rest.len() - result.rest.len();
             rest = result.rest;
         }
 
@@ -339,11 +355,19 @@ where
 ///     lit("a")
 /// ));
 /// ```
-#[inline(always)]
 pub fn alt(p1: Parser, p2: Parser) -> Parser {
     Rc::new(move |g, input| match p1(g, input) {
         ok @ Ok(_) => ok,
-        Err(_) => p2(g, input),
+        Err(err1) => match p2(g, input) {
+            ok @ Ok(_) => ok,
+            Err(err2) => {
+                let mut combined_err = err1.clone();
+                for expected in err2.expected {
+                    combined_err.add_expected(expected);
+                }
+                Err(combined_err)
+            }
+        },
     })
 }
 
@@ -398,10 +422,14 @@ pub fn many(p: Parser) -> Parser {
     Rc::new(move |g, input| {
         let mut out = Vec::new();
         let mut rest = input.to_string();
+        let mut _pos = 0;
+
         while let Ok(r) = p(g, &rest) {
             out.push(r.value);
+            _pos += rest.len() - r.rest.len();
             rest = r.rest;
         }
+
         Ok(ParseResult {
             value: Value::List(out),
             rest,
@@ -494,7 +522,11 @@ pub fn opt(p: Parser) -> Parser {
 /// // non-matching input
 /// let result = parser(&mut g, "goodbye");
 /// assert!(result.is_err());
-/// assert_eq!(result.unwrap_err(), "expected 'hello'");
+/// if let Err(err) = result {
+///     assert_eq!(err.message, "expected 'hello'");
+///     assert_eq!(err.position, 0);
+///     assert_eq!(err.expected, vec!["hello"]);
+/// }
 /// ```
 pub fn lit(s: &str) -> Parser {
     let s = s.to_string();
@@ -505,7 +537,9 @@ pub fn lit(s: &str) -> Parser {
                 rest: input[s.len()..].to_string(),
             })
         } else {
-            Err(format!("expected '{s}'"))
+            let mut err = ParseError::new(format!("expected '{}'", s), 0);
+            err.add_expected(s.clone());
+            Err(err)
         }
     })
 }
@@ -584,9 +618,11 @@ where
                     rest: input[size..].to_string(),
                 });
             }
-            Err(format!("unexpected char '{c}'"))
+            let mut err = ParseError::new(format!("unexpected char '{}'", c), 0);
+            err.add_expected("character satisfying predicate".to_string());
+            Err(err)
         } else {
-            Err("unexpected end of input".to_string())
+            Err(ParseError::new("unexpected end of input".to_string(), 0))
         }
     })
 }

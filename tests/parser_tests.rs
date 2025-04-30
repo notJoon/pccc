@@ -170,6 +170,7 @@ fn test_recursive_rule() {
     // recursive rule test
     let result = g.parse("A", "aaa");
     assert!(result.is_ok());
+
     if let Ok(res) = result {
         // ParseResult { value: List([Str("a"), List([Str("a"), Str("a")])]), rest: "" }
         assert!(is_list(&res.value, 2));
@@ -268,11 +269,19 @@ fn test_invalid_input() {
 
     let result = parser(&mut g, "world");
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "expected 'hello'");
+    if let Err(err) = result {
+        assert_eq!(err.message, "expected 'hello'");
+        assert_eq!(err.position, 0);
+        assert_eq!(err.expected, vec!["hello"]);
+    }
 
     let result = digit()(&mut g, "abc123");
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "unexpected char 'a'");
+    if let Err(err) = result {
+        assert_eq!(err.message, "unexpected char 'a'");
+        assert_eq!(err.position, 0);
+        assert_eq!(err.expected, vec!["character satisfying predicate"]);
+    }
 }
 
 #[test]
@@ -345,6 +354,20 @@ fn test_complex_sequence() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "123");
+    }
+}
+
+#[test]
+fn test_alt_error_handling() {
+    let mut g = Grammar::new();
+    let parser = alt(lit("a"), lit("b"));
+
+    let result = parser(&mut g, "c");
+    assert!(result.is_err());
+    if let Err(err) = result {
+        assert_eq!(err.message, "expected 'a'");
+        assert_eq!(err.position, 0);
+        assert_eq!(err.expected, vec!["a", "b"]);
     }
 }
 
