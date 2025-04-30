@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+use expr::ParserExpr;
+
 use crate::errors::ParseError;
 
 mod errors;
+pub mod expr;
 
 /// A dynamically-typed value for parsed results.
 ///
@@ -119,7 +122,7 @@ pub struct ParseResult {
 /// The parser takes a mutable reference to a `Grammar` (for rule lookups and memoization)
 /// and an input string, returning either a successful `ParseResult` or a `ParseError`.
 ///
-/// /// # Example
+/// # Example
 ///
 /// ```rust
 /// use pccc::{Parser, Grammar, lit, ParseResult, Value};
@@ -193,6 +196,12 @@ impl Grammar {
         self.rules.insert(name.to_string(), p);
     }
 
+    /// Define a grammar rule directly from a [`ParserExpr`].
+    pub fn define_expr(&mut self, name: &str, expr: ParserExpr) {
+        let parser = expr.compile();
+        self.define(name, parser);
+    }
+
     /// Parse the named rule over the given text, resetting memo.
     pub fn parse(&mut self, name: &str, text: &str) -> Result<ParseResult, ParseError> {
         self.input = text.to_string();
@@ -202,7 +211,8 @@ impl Grammar {
 
     /// parse a rule with packrat memoization.
     fn parse_rule(&mut self, name: &str, input: &str) -> Result<ParseResult, ParseError> {
-        let pos = self.input.len() - input.len();
+        // prevent overflow.
+        let pos = self.input.len().saturating_sub(input.len());
         let key = MemoKey {
             name: name.to_string(),
             pos,
@@ -604,27 +614,49 @@ pub fn lit(s: &str) -> Parser {
 ///     assert_eq!(c, '테');
 /// }
 /// ```
+///
+/// This version is monomorphic and intended for usage with inline closures. It allows
+/// the compiler to monomorphize and potentially inline the predicate for performance.
 pub fn satisfy<F>(pred: F) -> Parser
 where
     F: Fn(char) -> bool + 'static,
 {
-    Rc::new(move |_, input| {
-        let mut chars = input.chars();
-        if let Some(c) = chars.next() {
-            if pred(c) {
-                let size = c.len_utf8();
-                return Ok(ParseResult {
-                    value: Value::Char(c),
-                    rest: input[size..].to_string(),
-                });
-            }
-            let mut err = ParseError::new(format!("unexpected char '{}'", c), 0);
-            err.add_expected("character satisfying predicate".to_string());
-            Err(err)
-        } else {
-            Err(ParseError::new("unexpected end of input".to_string(), 0))
+    Rc::new(move |_, input| satisfy_internal(&pred, input))
+}
+
+/// Constructs a parser from a dynamically-dispatched character predicate.
+///
+/// This version is useful when the predicate needs to be passed around as a trait object,
+/// such as when building combinator expressions dynamically (e.g. with [`ParserExpr::Satisfy`]).
+///
+/// # Example
+/// ```ignore
+/// let is_upper = Rc::new(|c: char| c.is_uppercase());
+/// let parser = satisfy_dyn(is_upper);
+/// ```
+pub fn satisfy_dyn(pred: Rc<dyn Fn(char) -> bool>) -> Parser {
+    Rc::new(move |_, input| satisfy_internal(&*pred, input))
+}
+
+fn satisfy_internal<'a, F>(pred: F, input: &'a str) -> Result<ParseResult, ParseError>
+where
+    F: Fn(char) -> bool,
+{
+    let mut chars = input.chars();
+    if let Some(c) = chars.next() {
+        if pred(c) {
+            let size = c.len_utf8();
+            return Ok(ParseResult {
+                value: Value::Char(c),
+                rest: input[size..].to_string(),
+            });
         }
-    })
+        let mut err = ParseError::new(format!("unexpected char '{}'", c), 0);
+        err.add_expected("character satisfying predicate".to_string());
+        Err(err)
+    } else {
+        Err(ParseError::new("unexpected end of input".to_string(), 0))
+    }
 }
 
 /* Common predicates. */
@@ -654,4 +686,20 @@ pub fn letter() -> Parser {
 #[inline(always)]
 pub fn space() -> Parser {
     satisfy(|c| c.is_whitespace())
+}
+
+/// building sequence expressions.
+#[macro_export]
+macro_rules! seq {
+    ($($x:expr),+ $(,)?) => {
+        ParserExpr::Seq(vec![$($x),+])
+    };
+}
+
+/// building alternative expressions.
+#[macro_export]
+macro_rules! alt {
+    ($($x:expr),+ $(,)?) => {
+        ParserExpr::Alt(vec![$($x),+])
+    };
 }
