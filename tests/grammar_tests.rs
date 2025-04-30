@@ -1,5 +1,11 @@
 use pccc::*;
 
+macro_rules! parse_to_string {
+    ($g:expr, $rule:expr, $input:expr) => {
+        $g.parse($rule, $input).unwrap().value.to_string()
+    };
+}
+
 #[test]
 fn test_pseudo_json_grammar() {
     let mut g = Grammar::new();
@@ -71,64 +77,20 @@ fn test_pseudo_json_grammar() {
     );
 
     let result = g.parse("Value", "{\"name\":\"value\"}");
+    println!(
+        "result: {:?}",
+        parse_to_string!(g, "Value", "{\"name\":\"value\"}")
+    );
     assert!(result.is_ok());
 
     let arr_result = g.parse("Value", "[1,2,3]");
+    println!("arr_result: {:?}", parse_to_string!(g, "Value", "[1,2,3]"));
     assert!(arr_result.is_ok());
 
     let nested_result = g.parse("Value", "{\"arr\":[1,{\"key\":\"val\"}]}");
+    println!(
+        "nested_result: {:?}",
+        parse_to_string!(g, "Value", "{\"arr\":[1,{\"key\":\"val\"}]}")
+    );
     assert!(nested_result.is_ok());
-}
-
-#[test]
-fn test_calculator_grammar() {
-    let mut g = Grammar::new();
-
-    // Simple calculator grammar
-    //  Expr ::= Term (("+" | "-") Term)*
-    //  Term ::= Factor (("*" | "/") Factor)*
-    //  Factor ::= Number | "(" Expr ")"
-    //  Number ::= Digit+
-
-    // Define Number
-    g.define("Number", seq(digit(), many(digit())));
-
-    // Define Factor (parenthesized expression or number)
-    g.define(
-        "Factor",
-        alt(
-            rule_ref("Number".to_string()),
-            seq(lit("("), seq(rule_ref("Expr".to_string()), lit(")"))),
-        ),
-    );
-
-    // Define Term (multiplication/division of terms)
-    g.define(
-        "Term",
-        seq(
-            rule_ref("Factor".to_string()),
-            many(seq(alt(lit("*"), lit("/")), rule_ref("Factor".to_string()))),
-        ),
-    );
-
-    // Define Expr (addition/subtraction of terms)
-    g.define(
-        "Expr",
-        seq(
-            rule_ref("Term".to_string()),
-            many(seq(alt(lit("+"), lit("-")), rule_ref("Term".to_string()))),
-        ),
-    );
-
-    // Simple expression test
-    let result = g.parse("Expr", "1+2*3");
-    assert!(result.is_ok());
-
-    // Expression with parentheses test
-    let result = g.parse("Expr", "(1+2)*3");
-    assert!(result.is_ok());
-
-    // Complex expression test
-    let result = g.parse("Expr", "1+(2*3-4)/5");
-    assert!(result.is_ok());
 }

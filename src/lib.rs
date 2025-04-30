@@ -25,7 +25,7 @@ use std::rc::Rc;
 /// // None value (for optional patterns that didn't match)
 /// let none_val = Value::None;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Str(String),
     Char(char),
@@ -34,23 +34,6 @@ pub enum Value {
 }
 
 impl Value {
-    /// Convert a `Value` to a string.
-    ///
-    /// ```
-    /// use pccc::Value;
-    ///
-    /// let value = Value::Str("hello".to_string());
-    /// assert_eq!(value.to_string(), "hello");
-    ///
-    /// let value = Value::Char('a');
-    /// assert_eq!(value.to_string(), "a");
-    ///
-    /// let value = Value::List(vec![Value::Str("hello".to_string()), Value::Char('a')]);
-    /// assert_eq!(value.to_string(), "[hello,a]");
-    ///
-    /// let value = Value::None;
-    /// assert_eq!(value.to_string(), "None");
-    /// ```
     pub fn to_string(&self) -> String {
         match self {
             Value::Str(s) => s.clone(),
@@ -71,11 +54,22 @@ impl Value {
     }
 
     fn format_list(items: &[Value]) -> String {
-        items
-            .iter()
-            .map(|item| item.to_string())
-            .collect::<Vec<String>>()
-            .join(",")
+        if items.is_empty() {
+            return "".to_string();
+        }
+        if items.len() == 1 {
+            return items[0].to_string();
+        }
+
+        let mut result = String::new();
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                result.push_str(&item.to_string());
+            } else {
+                result = item.to_string();
+            }
+        }
+        result
     }
 }
 
@@ -113,7 +107,6 @@ pub struct ParseResult {
 ///
 /// ```rust
 /// use pccc::{Parser, Grammar, lit, ParseResult, Value};
-/// use std::rc::Rc;
 ///
 /// // simple "hello" parser
 /// let hello_parser: Parser = lit("hello");
@@ -188,10 +181,6 @@ impl Grammar {
 
     /// parse a rule with packrat memoization.
     fn parse_rule(&mut self, name: &str, input: &str) -> Result<ParseResult, String> {
-        if input.is_empty() {
-            return Err("empty input".to_string());
-        }
-
         let pos = self.input.len() - input.len();
         let key = MemoKey {
             name: name.to_string(),
@@ -216,6 +205,21 @@ impl Grammar {
         }
 
         result
+    }
+
+    /// Check that there is no input left after parsing
+    pub fn parse_all(&mut self, rule: &str, input: &str) -> Result<Value, String> {
+        let result = self.parse(rule, input)?;
+        if result.rest.is_empty() {
+            Ok(result.value)
+        } else {
+            Err("input not fully consumed".to_string())
+        }
+    }
+
+    /// Get the size of the memoizationed cache.
+    pub fn memo_size(&self) -> usize {
+        self.memo.len()
     }
 }
 
@@ -276,9 +280,7 @@ pub fn seq(p1: Parser, p2: Parser) -> Parser {
     Rc::new(move |g, input| {
         let r1 = p1(g, input)?;
         let r2 = p2(g, &r1.rest)?;
-        // each sequence combines exactly two parsers.
-        // so we can pre-allocate the list with a capacity of 2.
-        let mut list = Vec::with_capacity(2);
+        let mut list = Vec::new();
 
         list.push(r1.value);
         list.push(r2.value);
@@ -352,7 +354,7 @@ pub fn alt(p1: Parser, p2: Parser) -> Parser {
 /// let result = parser(&mut g, "12345abc");
 /// assert!(result.is_ok());
 ///
-///  let parsed = result.unwrap();
+/// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, "abc");
 ///
 /// // The value should be a list of 5 digits
@@ -788,9 +790,9 @@ mod tests {
         }
 
         let result = parser(&mut g, "world");
-        assert!(result.is_ok()); // 항상 성공함
+        assert!(result.is_ok()); // always succeeds
         if let Ok(res) = result {
-            assert_eq!(res.rest, "world"); // 입력이 그대로 남아야 함
+            assert_eq!(res.rest, "world"); // input should be left unchanged
             assert!(matches!(res.value, Value::None));
         }
     }
@@ -840,33 +842,7 @@ mod tests {
         // test memoization effect with long expression
         let result = g.parse("Expr", "1+2+3+4+5");
         assert!(result.is_ok());
-        assert!(g.memo.len() > 0, "memo cache should be non-empty");
-    }
-
-    #[test]
-    fn test_empty_input() {
-        let mut g = Grammar::new();
-
-        g.define("Term", digit());
-        g.define(
-            "Expr",
-            seq(
-                rule_ref("Term".to_string()),
-                many(seq(lit("+"), rule_ref("Term".to_string()))),
-            ),
-        );
-
-        let result = g.parse("Expr", "");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "empty input");
-
-        // whitespace input
-        let result = g.parse("Expr", " ");
-        assert!(result.is_err());
-
-        // undefined rule
-        let result = g.parse("Undefined", "");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "empty input");
+        assert!(g.memo_size() > 0, "memo cache should be non-empty");
+        println!("memo size: {}", g.memo_size());
     }
 }

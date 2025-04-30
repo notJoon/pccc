@@ -1,0 +1,27 @@
+[book]
+title = "PCCC: Parser Combinator in Rust"
+authors = ["Lee ByeongJun"]
+description = "Documentation for the PCCC parser combinator library"
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/pccc/pccc"
+edit-url-template = "https://github.com/pccc/pccc/edit/main/book/{path}"
+additional-css = ["theme/custom.css"]
+
+[output.html.playpen]
+editable = true
+line-numbers = true
+
+[output.html.search]
+limit-results = 20
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 2
+boost-paragraph = 1
+expand = true
+heading-split-level = 2
