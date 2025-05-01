@@ -273,7 +273,6 @@ impl Grammar {
 /// 2. For **non-greedy matching** (consuming as little input as possible), put the recursive pattern last.
 ///
 /// Incorrect ordering can lead to infinite recursion or incomplete parsing.
-#[inline(always)]
 pub fn rule_ref(name: String) -> Parser {
     Rc::new(move |g: &mut Grammar, input: &str| {
         let pos = g.input.len().saturating_sub(input.len());
@@ -464,8 +463,6 @@ pub fn many(p: Parser) -> Parser {
             children.iter().map(|n| n.value.clone()).collect(),
         )
         .with_children(children);
-
-        println!("node: {:?}", node);
 
         Ok(ParseResult { node, rest })
     })
@@ -738,7 +735,6 @@ where
 ///
 /// The `digit` function is a convenience parser that matches any ASCII digit character.
 /// It is equivalent to `satisfy(|c| c.is_ascii_digit())`.
-#[inline(always)]
 pub fn digit() -> Parser {
     satisfy(|c| c.is_ascii_digit())
 }
@@ -747,7 +743,6 @@ pub fn digit() -> Parser {
 ///
 /// The `letter` function is a convenience parser that matches any Unicode alphabetic character.
 /// It is equivalent to `satisfy(|c| c.is_alphabetic())`.
-#[inline(always)]
 pub fn letter() -> Parser {
     satisfy(|c| c.is_alphabetic())
 }
@@ -756,7 +751,6 @@ pub fn letter() -> Parser {
 ///
 /// The `space` function is a convenience parser that matches any Unicode whitespace character.
 /// It is equivalent to `satisfy(|c| c.is_whitespace())`.
-#[inline(always)]
 pub fn space() -> Parser {
     satisfy(|c| c.is_whitespace())
 }
