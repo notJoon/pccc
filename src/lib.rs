@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+use ast::{Node, NodeKind, Span};
 use expr::ParserExpr;
 
 use crate::errors::ParseError;
 
-mod errors;
+pub mod ast;
+pub mod errors;
 pub mod expr;
 
 /// A dynamically-typed value for parsed results.
@@ -92,7 +94,7 @@ impl fmt::Display for Value {
     }
 }
 
-/// The result of a parse: a Value and the remaining input.
+/// The result of a parse: a Node and the remaining input.
 ///
 /// A `ParseResult` contains both the parsed value and any remaining unparsed input.
 /// This enables parsers to be chained together, with each consuming part of the input.
@@ -101,10 +103,15 @@ impl fmt::Display for Value {
 ///
 /// ```rust
 /// use pccc::{Value, ParseResult};
+/// use pccc::ast::{Node, NodeKind, Span};
 ///
 /// // A successful parse of a character with remaining input
 /// let result = ParseResult {
-///     value: Value::Char('a'),
+///     node: Node::new(
+///         NodeKind::Terminal("a".to_string()),
+///         Span { start: 0, end: 1 },
+///         "a".to_string(),
+///     ),
 ///     rest: "bc".to_string(),
 /// };
 ///
@@ -113,7 +120,7 @@ impl fmt::Display for Value {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ParseResult {
-    pub value: Value,
+    pub node: Node,
     pub rest: String,
 }
 
@@ -239,10 +246,10 @@ impl Grammar {
     }
 
     /// Check that there is no input left after parsing
-    pub fn parse_all(&mut self, rule: &str, input: &str) -> Result<Value, ParseError> {
+    pub fn parse_all(&mut self, rule: &str, input: &str) -> Result<Node, ParseError> {
         let result = self.parse(rule, input)?;
         if result.rest.is_empty() {
-            Ok(result.value)
+            Ok(result.node)
         } else {
             Err(ParseError::new(
                 "input not fully consumed".to_string(),
@@ -252,6 +259,7 @@ impl Grammar {
     }
 
     /// Get the size of the memoizationed cache.
+    #[inline]
     pub fn memo_size(&self) -> usize {
         self.memo.len()
     }
@@ -267,24 +275,41 @@ impl Grammar {
 /// Incorrect ordering can lead to infinite recursion or incomplete parsing.
 #[inline(always)]
 pub fn rule_ref(name: String) -> Parser {
-    Rc::new(move |g: &mut Grammar, input: &str| g.parse_rule(&name, input))
+    Rc::new(move |g: &mut Grammar, input: &str| {
+        let pos = g.input.len().saturating_sub(input.len());
+        let result = g.parse_rule(&name, input)?;
+        let node = Node::new(
+            NodeKind::NonTerminal(name.clone()),
+            Span {
+                start: pos,
+                end: pos + (input.len() - result.rest.len()),
+            },
+            result.node.value.clone(),
+        )
+        .with_children(vec![result.node]);
+
+        Ok(ParseResult {
+            node,
+            rest: result.rest,
+        })
+    })
 }
 
 /// Sequence takes multiple parsers and applies them in sequence.
 ///
 /// The `seq` combinator applies two parsers in sequence. It only succeeds
-/// if both parsers succeed. The result combines both parsed values into a list.
+/// if both parsers succeed. The result combines both parsed values into a string.
 ///
 /// # Features
 ///
 /// - Consumes input sequentially through both parsers
-/// - Returns a `Value::List` containing results from both parsers
+/// - Returns a concatenated string of all parsed values
 /// - Fails if either parser fails
 ///
 /// # Examples
 ///
 /// ```rust
-/// use pccc::{Grammar, seq, lit, Value};
+/// use pccc::{Grammar, seq, lit};
 ///
 /// let parser = seq([lit("hello"), lit(" world")]);
 /// let mut g = Grammar::new();
@@ -296,20 +321,8 @@ pub fn rule_ref(name: String) -> Parser {
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, "!");
 ///
-/// // Check the parsed value (it should be a list with two items)
-/// if let Value::List(items) = parsed.value {
-///     assert_eq!(items.len(), 2);
-///     // First item should be "hello"
-///     if let Value::Str(s) = &items[0] {
-///         assert_eq!(s, "hello");
-///     }
-///     // Second item should be " world"
-///     if let Value::Str(s) = &items[1] {
-///         assert_eq!(s, " world");
-///     }
-/// } else {
-///     panic!("expected List value");
-/// }
+/// // Check the parsed value (it should be a concatenated string)
+/// assert_eq!(parsed.node.value, "hello world");
 /// ```
 pub fn seq<I>(parsers: I) -> Parser
 where
@@ -317,20 +330,27 @@ where
 {
     Rc::new(move |g, input| {
         let mut rest = input.to_string();
-        let mut values = Vec::new();
-        let mut _pos = 0;
+        let mut children = Vec::new();
+        let start_pos = g.input.len().saturating_sub(input.len());
 
         for parser in parsers.clone().into_iter() {
             let result = parser(g, &rest)?;
-            values.push(result.value);
-            _pos += rest.len() - result.rest.len();
+            children.push(result.node);
             rest = result.rest;
         }
 
-        Ok(ParseResult {
-            value: Value::List(values),
-            rest,
-        })
+        let end_pos = g.input.len().saturating_sub(rest.len());
+        let node = Node::new(
+            NodeKind::Sequence(children.clone()),
+            Span {
+                start: start_pos,
+                end: end_pos,
+            },
+            children.iter().map(|n| n.value.clone()).collect(),
+        )
+        .with_children(children);
+
+        Ok(ParseResult { node, rest })
     })
 }
 
@@ -366,18 +386,21 @@ where
 /// ));
 /// ```
 pub fn alt(p1: Parser, p2: Parser) -> Parser {
-    Rc::new(move |g, input| match p1(g, input) {
-        ok @ Ok(_) => ok,
-        Err(err1) => match p2(g, input) {
+    Rc::new(move |g, input| {
+        let _pos = g.input.len().saturating_sub(input.len());
+        match p1(g, input) {
             ok @ Ok(_) => ok,
-            Err(err2) => {
-                let mut combined_err = err1.clone();
-                for expected in err2.expected {
-                    combined_err.add_expected(expected);
+            Err(err1) => match p2(g, input) {
+                ok @ Ok(_) => ok,
+                Err(err2) => {
+                    let mut combined_err = err1.clone();
+                    for expected in err2.expected {
+                        combined_err.add_expected(expected);
+                    }
+                    Err(combined_err)
                 }
-                Err(combined_err)
-            }
-        },
+            },
+        }
     })
 }
 
@@ -391,12 +414,12 @@ pub fn alt(p1: Parser, p2: Parser) -> Parser {
 ///
 /// - Matches the parser zero or more times, greedily
 /// - Always succeeds, even if zero matches (returns empty list)
-/// - Returns all matches as a `Value::List`
+/// - Returns all matches as a concatenated string
 ///
 /// # Examples
 ///
 /// ```rust
-/// use pccc::{Grammar, many, digit, Value};
+/// use pccc::{Grammar, many, digit};
 ///
 /// let parser = many(digit());
 /// let mut g = Grammar::new();
@@ -406,44 +429,45 @@ pub fn alt(p1: Parser, p2: Parser) -> Parser {
 /// assert!(result.is_ok());
 ///
 /// let parsed = result.unwrap();
+/// assert_eq!(parsed.node.value, "12345");
 /// assert_eq!(parsed.rest, "abc");
 ///
-/// // The value should be a list of 5 digits
-/// if let Value::List(items) = parsed.value {
-///     assert_eq!(items.len(), 5);
-///     // Check first digit is '1'
-///     if let Value::Char(c) = items[0] {
-///         assert_eq!(c, '1');
-///     }
-/// }
+/// // The value should be a string of 5 digits
+/// assert_eq!(parsed.node.value.len(), 5);
+/// assert_eq!(parsed.node.value.chars().next().unwrap(), '1');
 ///
-/// // no digits. should succeed with empty list
+/// // no digits. should succeed with empty string
 /// let result = parser(&mut g, "abc");
 /// assert!(result.is_ok());
 ///
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, "abc");
-///
-/// if let Value::List(items) = parsed.value {
-///     assert_eq!(items.len(), 0); // Empty list
-/// }
+/// assert_eq!(parsed.node.value, ""); // Empty string
 /// ```
 pub fn many(p: Parser) -> Parser {
     Rc::new(move |g, input| {
-        let mut out = Vec::new();
+        let mut children = Vec::new();
         let mut rest = input.to_string();
-        let mut _pos = 0;
+        let pos = g.input.len().saturating_sub(input.len());
 
         while let Ok(r) = p(g, &rest) {
-            out.push(r.value);
-            _pos += rest.len() - r.rest.len();
+            children.push(r.node);
             rest = r.rest;
         }
 
-        Ok(ParseResult {
-            value: Value::List(out),
-            rest,
-        })
+        let node = Node::new(
+            NodeKind::Many(children.clone()),
+            Span {
+                start: pos,
+                end: pos + input.len().saturating_sub(rest.len()),
+            },
+            children.iter().map(|n| n.value.clone()).collect(),
+        )
+        .with_children(children);
+
+        println!("node: {:?}", node);
+
+        Ok(ParseResult { node, rest })
     })
 }
 
@@ -451,18 +475,18 @@ pub fn many(p: Parser) -> Parser {
 ///
 /// The `opt` combinator makes a parser optional. It tries to apply the parser once,
 /// and if successful, returns the parser's result. If the parser fails, `opt` still
-/// succeeds but returns `Value::None` without consuming any input.
+/// succeeds but returns an empty node without consuming any input.
 ///
 /// # Features
 ///
 /// - Makes a pattern optional
-/// - Always succeeds - either with the original parser's result or `Value::None`
+/// - Always succeeds - either with the original parser's result or an empty node
 /// - Consumes input only if the inner parser succeeds
 ///
 /// # Examples
 ///
 /// ```
-/// use pccc::{Grammar, opt, lit, Value};
+/// use pccc::{Grammar, opt, lit};
 ///
 /// // Create a parser for an optional "hello"
 /// let parser = opt(lit("hello"));
@@ -474,11 +498,7 @@ pub fn many(p: Parser) -> Parser {
 /// assert!(result.is_ok());
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, " world");
-///
-/// // The value should be the parsed string
-/// if let Value::Str(s) = parsed.value {
-///     assert_eq!(s, "hello");
-/// }
+/// assert_eq!(parsed.node.value, "hello");
 ///
 /// // no pattern
 /// let result = parser(&mut g, "world");
@@ -486,15 +506,54 @@ pub fn many(p: Parser) -> Parser {
 ///
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, "world"); // no input consumed
-/// assert!(matches!(parsed.value, Value::None));
+/// assert_eq!(parsed.node.value, "");
 /// ```
 pub fn opt(p: Parser) -> Parser {
-    Rc::new(move |g, input| match p(g, input) {
-        Ok(r) => Ok(r),
-        Err(_) => Ok(ParseResult {
-            value: Value::None,
-            rest: input.to_string(),
-        }),
+    Rc::new(move |g, input| {
+        let pos = g.input.len().saturating_sub(input.len());
+        match p(g, input) {
+            Ok(r) => {
+                // If the parser succeeds, create an Optional node containing the result
+                // We need to clone the inner node since we'll use it in two places
+                let inner_node = r.node.clone();
+                let node = Node::new(
+                    // Wrap the successful result in an Optional node
+                    NodeKind::Optional(Box::new(inner_node)),
+                    // Span covers the entire matched portion
+                    Span {
+                        start: pos,
+                        end: pos + (input.len() - r.rest.len()),
+                    },
+                    // Use the value from the successful parse
+                    r.node.value.clone(),
+                );
+                Ok(ParseResult { node, rest: r.rest })
+            }
+            Err(_) => {
+                // If the parser fails, create an Optional node with an empty inner node
+                let node = Node::new(
+                    // The inner node is an empty Terminal
+                    NodeKind::Optional(Box::new(Node::new(
+                        NodeKind::Terminal("".to_string()),
+                        Span {
+                            start: pos,
+                            end: pos,
+                        },
+                        "".to_string(),
+                    ))),
+                    // The Optional node itself has the same empty span
+                    Span {
+                        start: pos,
+                        end: pos,
+                    },
+                    "".to_string(),
+                );
+                Ok(ParseResult {
+                    node,
+                    rest: input.to_string(),
+                })
+            }
+        }
     })
 }
 
@@ -525,9 +584,7 @@ pub fn opt(p: Parser) -> Parser {
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, " world");
 ///
-/// if let Value::Str(s) = parsed.value {
-///     assert_eq!(s, "hello");
-/// }
+/// assert_eq!(parsed.node.value, "hello");
 ///
 /// // non-matching input
 /// let result = parser(&mut g, "goodbye");
@@ -540,14 +597,23 @@ pub fn opt(p: Parser) -> Parser {
 /// ```
 pub fn lit(s: &str) -> Parser {
     let s = s.to_string();
-    Rc::new(move |_g, input| {
+    Rc::new(move |g, input| {
+        let pos = g.input.len().saturating_sub(input.len());
         if input.starts_with(&s) {
+            let node = Node::new(
+                NodeKind::Terminal(s.clone()),
+                Span {
+                    start: pos,
+                    end: pos + s.len(),
+                },
+                s.clone(),
+            );
             Ok(ParseResult {
-                value: Value::Str(s.clone()),
+                node,
                 rest: input[s.len()..].to_string(),
             })
         } else {
-            let mut err = ParseError::new(format!("expected '{}'", s), 0);
+            let mut err = ParseError::new(format!("expected '{}'", s), pos);
             err.add_expected(s.clone());
             Err(err)
         }
@@ -585,9 +651,7 @@ pub fn lit(s: &str) -> Parser {
 /// assert_eq!(parsed.rest, "ello");
 ///
 /// // The value should be the matched character
-/// if let Value::Char(c) = parsed.value {
-///     assert_eq!(c, 'H');
-/// }
+/// assert_eq!(parsed.node.value, "H");
 ///
 /// // non-matching input
 /// let result = parser(&mut g, "hello");
@@ -600,9 +664,7 @@ pub fn lit(s: &str) -> Parser {
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, " crab");
 ///
-/// if let Value::Char(c) = parsed.value {
-///     assert_eq!(c, '🦀');
-/// }
+/// assert_eq!(parsed.node.value, "🦀");
 ///
 /// // non-ascii character
 /// let result = satisfy(|c| true)(&mut g, "테스트 문자열");
@@ -610,9 +672,7 @@ pub fn lit(s: &str) -> Parser {
 /// let parsed = result.unwrap();
 /// assert_eq!(parsed.rest, "스트 문자열");
 ///
-/// if let Value::Char(c) = parsed.value {
-///     assert_eq!(c, '테');
-/// }
+/// assert_eq!(parsed.node.value, "테");
 /// ```
 ///
 /// This version is monomorphic and intended for usage with inline closures. It allows
@@ -621,7 +681,7 @@ pub fn satisfy<F>(pred: F) -> Parser
 where
     F: Fn(char) -> bool + 'static,
 {
-    Rc::new(move |_, input| satisfy_internal(&pred, input))
+    Rc::new(move |g, input| satisfy_internal(&pred, input, g))
 }
 
 /// Constructs a parser from a dynamically-dispatched character predicate.
@@ -635,27 +695,40 @@ where
 /// let parser = satisfy_dyn(is_upper);
 /// ```
 pub fn satisfy_dyn(pred: Rc<dyn Fn(char) -> bool>) -> Parser {
-    Rc::new(move |_, input| satisfy_internal(&*pred, input))
+    Rc::new(move |g, input| satisfy_internal(&*pred, input, g))
 }
 
-fn satisfy_internal<'a, F>(pred: F, input: &'a str) -> Result<ParseResult, ParseError>
+fn satisfy_internal<'a, F>(
+    pred: F,
+    input: &'a str,
+    g: &mut Grammar,
+) -> Result<ParseResult, ParseError>
 where
     F: Fn(char) -> bool,
 {
+    let pos = g.input.len().saturating_sub(input.len());
     let mut chars = input.chars();
     if let Some(c) = chars.next() {
         if pred(c) {
             let size = c.len_utf8();
+            let node = Node::new(
+                NodeKind::Satisfy(format!("character satisfying predicate")),
+                Span {
+                    start: pos,
+                    end: pos + size,
+                },
+                c.to_string(),
+            );
             return Ok(ParseResult {
-                value: Value::Char(c),
+                node,
                 rest: input[size..].to_string(),
             });
         }
-        let mut err = ParseError::new(format!("unexpected char '{}'", c), 0);
+        let mut err = ParseError::new(format!("unexpected char '{}'", c), pos);
         err.add_expected("character satisfying predicate".to_string());
         Err(err)
     } else {
-        Err(ParseError::new("unexpected end of input".to_string(), 0))
+        Err(ParseError::new("unexpected end of input".to_string(), pos))
     }
 }
 

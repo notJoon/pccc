@@ -65,7 +65,7 @@ pub fn satisfy_(f: impl Fn(char) -> bool + 'static) -> ParserExpr {
 #[cfg(test)]
 mod expr_tests {
     use super::*;
-    use crate::{Grammar, ParseResult, Value, satisfy};
+    use crate::{Grammar, ParseResult, satisfy};
 
     #[test]
     fn test_satisfy_dyn_matches_digit() {
@@ -76,8 +76,8 @@ mod expr_tests {
         let result = parser(&mut g, "3abc");
         assert!(result.is_ok());
 
-        let ParseResult { value, rest } = result.unwrap();
-        assert_eq!(value, Value::Char('3'));
+        let ParseResult { node, rest } = result.unwrap();
+        assert_eq!(node.value, "3");
         assert_eq!(rest, "abc");
     }
 
@@ -90,8 +90,8 @@ mod expr_tests {
         let result = expr(&mut g, "7x");
         assert!(result.is_ok());
 
-        let ParseResult { value, rest } = result.unwrap();
-        assert_eq!(value, Value::Char('7'));
+        let ParseResult { node, rest } = result.unwrap();
+        assert_eq!(node.value, "7");
         assert_eq!(rest, "x");
     }
 
@@ -103,8 +103,8 @@ mod expr_tests {
         let result = expr(&mut g, "hi!");
         assert!(result.is_ok());
 
-        let ParseResult { value, rest } = result.unwrap();
-        assert_eq!(value, Value::Str("hi".into()));
+        let ParseResult { node, rest } = result.unwrap();
+        assert_eq!(node.value, "hi");
         assert_eq!(rest, "!");
     }
 
@@ -119,12 +119,9 @@ mod expr_tests {
         let result = parser(&mut g, "abc");
         assert!(result.is_ok());
 
-        let ParseResult { value, rest } = result.unwrap();
+        let ParseResult { node, rest } = result.unwrap();
         assert_eq!(rest, "c");
-        assert_eq!(
-            value,
-            Value::List(vec![Value::Str("a".into()), Value::Str("b".into())])
-        );
+        assert_eq!(node.value, "ab");
     }
 
     #[test]
@@ -139,8 +136,8 @@ mod expr_tests {
         let result = parser(&mut g, "bcd");
         assert!(result.is_ok());
 
-        let ParseResult { value, rest } = result.unwrap();
+        let ParseResult { node, rest } = result.unwrap();
         assert_eq!(rest, "cd");
-        assert_eq!(value, Value::Str("b".into()));
+        assert_eq!(node.value, "b");
     }
 }

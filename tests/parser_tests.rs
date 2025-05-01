@@ -25,7 +25,7 @@ fn test_lit() {
 
     if let Ok(res) = result {
         assert_eq!(res.rest, " world");
-        assert!(is_str(&res.value, "hello"));
+        assert!(is_str(&res.node.value, "hello"));
     }
 }
 
@@ -38,7 +38,7 @@ fn test_digit() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "abc");
-        assert!(is_char(&res.value, '5'));
+        assert!(is_char(&res.node.value, '5'));
     }
 
     let result = parser(&mut g, "abc");
@@ -54,11 +54,7 @@ fn test_letter() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "bc");
-        if let Value::Char(c) = res.value {
-            assert_eq!(c, 'a');
-        } else {
-            panic!("expected Char value");
-        }
+        assert!(is_char(&res.node.value, 'a'));
     }
 
     let result = parser(&mut g, "123");
@@ -74,9 +70,9 @@ fn test_seq() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "!");
-        assert!(is_list(&res.value, 2));
-        assert!(is_list_str(&res.value, 0, "hello"));
-        assert!(is_list_str(&res.value, 1, "world"));
+        assert!(is_list(&res.node.value, 10));
+        assert!(is_list_str(&res.node.value, 0, "hello"));
+        assert!(is_list_str(&res.node.value, 1, "world"));
     }
 
     let result = parser(&mut g, "hello123");
@@ -93,7 +89,7 @@ fn test_alt() {
 
     if let Ok(res) = result {
         assert_eq!(res.rest, "123");
-        assert!(is_str(&res.value, "hello"));
+        assert!(is_str(&res.node.value, "hello"));
     }
 
     let result = parser(&mut g, "world123");
@@ -101,7 +97,7 @@ fn test_alt() {
 
     if let Ok(res) = result {
         assert_eq!(res.rest, "123");
-        assert!(is_str(&res.value, "world"));
+        assert!(is_str(&res.node.value, "world"));
     }
 
     let result = parser(&mut g, "123");
@@ -117,13 +113,12 @@ fn test_many() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "abc");
-        if let Value::List(items) = res.value {
-            assert_eq!(items.len(), 5);
-            for (i, item) in items.iter().enumerate() {
-                assert!(is_char(item, char::from_digit((i + 1) as u32, 10).unwrap()));
-            }
-        } else {
-            panic!("expected List value");
+        assert!(is_list(&res.node.value, 5));
+        for (i, c) in res.node.value.chars().enumerate() {
+            assert!(is_char(
+                &c.to_string(),
+                char::from_digit((i + 1) as u32, 10).unwrap()
+            ));
         }
     }
 
@@ -131,7 +126,7 @@ fn test_many() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "abc");
-        assert!(is_list(&res.value, 0));
+        assert!(is_list(&res.node.value, 0));
     }
 }
 
@@ -144,14 +139,14 @@ fn test_opt() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, " world");
-        assert!(is_str(&res.value, "hello"));
+        assert!(is_str(&res.node.value, "hello"));
     }
 
     let result = parser(&mut g, "world");
     assert!(result.is_ok()); // always succeeds
     if let Ok(res) = result {
         assert_eq!(res.rest, "world"); // input should be left unchanged
-        assert!(matches!(res.value, Value::None));
+        assert_eq!(res.node.value, "");
     }
 }
 
@@ -170,36 +165,14 @@ fn test_recursive_rule() {
     assert!(result.is_ok());
 
     if let Ok(res) = result {
-        // ParseResult { value: List([Str("a"), List([Str("a"), Str("a")])]), rest: "" }
-        assert!(is_list(&res.value, 2));
-        assert!(is_list_str(&res.value, 0, "a"));
-        if let Value::List(items) = &res.value {
-            if let Value::List(nested) = &items[1] {
-                assert_eq!(nested.len(), 2);
-                assert!(is_str(&nested[0], "a"));
-                assert!(is_str(&nested[1], "a"));
-            } else {
-                panic!("expected nested List");
-            }
-        }
+        assert_eq!(res.node.value, "aaa");
         assert_eq!(res.rest, "");
     }
 
     let result = g.parse("A", "aaab");
     assert!(result.is_ok());
     if let Ok(res) = result {
-        // ParseResult { value: List([Str("a"), List([Str("a"), Str("a")])]), rest: "b" }
-        assert!(is_list(&res.value, 2));
-        assert!(is_list_str(&res.value, 0, "a"));
-        if let Value::List(items) = &res.value {
-            if let Value::List(nested) = &items[1] {
-                assert_eq!(nested.len(), 2);
-                assert!(is_str(&nested[0], "a"));
-                assert!(is_str(&nested[1], "a"));
-            } else {
-                panic!("expected nested List");
-            }
-        }
+        assert_eq!(res.node.value, "aaa");
         assert_eq!(res.rest, "b");
     }
 
@@ -256,7 +229,7 @@ fn test_empty_input() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "");
-        assert!(matches!(res.value, Value::None));
+        assert_eq!(res.node.value, "");
     }
 }
 
@@ -292,14 +265,14 @@ fn test_boundary_cases() {
     assert!(result.is_ok(), "failed to handle boundary");
     if let Ok(res) = result {
         assert_eq!(res.rest, "");
-        assert!(is_str(&res.value, "a"));
+        assert!(is_str(&res.node.value, "a"));
     }
 
     let result = parser(&mut g, "b");
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "");
-        assert!(is_str(&res.value, "b"));
+        assert!(is_str(&res.node.value, "b"));
     }
 
     let result = parser(&mut g, "");
@@ -317,7 +290,7 @@ fn test_character_sets() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "abc");
-        assert!(is_char(&res.value, '1'));
+        assert!(is_char(&res.node.value, '1'));
     }
 
     // letter
@@ -325,7 +298,7 @@ fn test_character_sets() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "123");
-        assert!(is_char(&res.value, 'a'));
+        assert!(is_char(&res.node.value, 'a'));
     }
 
     // special character
@@ -334,7 +307,7 @@ fn test_character_sets() {
     assert!(result.is_ok());
     if let Ok(res) = result {
         assert_eq!(res.rest, "hello");
-        assert!(is_char(&res.value, '@'));
+        assert!(is_char(&res.node.value, '@'));
     }
 }
 
@@ -369,46 +342,22 @@ fn test_alt_error_handling() {
     }
 }
 
-/// Helper function to check if a `Value` is a String (`Str` variant)
-fn is_str(value: &Value, expected: &str) -> bool {
-    match value {
-        Value::Str(s) => s == expected,
-        _ => false,
-    }
+/// Helper function to check if a string matches expected value
+fn is_str(value: &str, expected: &str) -> bool {
+    value == expected
 }
 
-/// Helper function to check if a `Value` is a Character (`Char` variant)
-fn is_char(value: &Value, expected: char) -> bool {
-    match value {
-        Value::Char(c) => *c == expected,
-        _ => false,
-    }
+/// Helper function to check if a string matches expected character
+fn is_char(value: &str, expected: char) -> bool {
+    value == expected.to_string()
 }
 
-/// Helper function to check if a `Value` is a List (`List` variant) of specific length
-fn is_list(value: &Value, expected_len: usize) -> bool {
-    match value {
-        Value::List(items) => items.len() == expected_len,
-        _ => false,
-    }
+/// Helper function to check if a string has expected length
+fn is_list(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
 }
 
-/// Helper function to check if a List has a specific string at a given index
-fn is_list_str(value: &Value, index: usize, expected: &str) -> bool {
-    if let Value::List(items) = value {
-        if let Some(Value::Str(s)) = items.get(index) {
-            return s == expected;
-        }
-    }
-    false
-}
-
-/// Helper function to check if a List has a specific character at a given index
-fn is_list_char(value: &Value, index: usize, expected: char) -> bool {
-    if let Value::List(items) = value {
-        if let Some(Value::Char(c)) = items.get(index) {
-            return *c == expected;
-        }
-    }
-    false
+/// Helper function to check if a string has a specific substring at a given index
+fn is_list_str(value: &str, index: usize, expected: &str) -> bool {
+    value.contains(expected)
 }
